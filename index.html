@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#050303">
+<title>불멍</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; margin: 0; overflow: hidden;
+    background: #050303;
+    overscroll-behavior: none;
+  }
+  body {
+    position: fixed; inset: 0;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #fullscreen {
+    position: fixed;
+    top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    width: 38px; height: 38px;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 50%;
+    color: rgba(255,255,255,.55);
+    background: rgba(20,12,10,.28);
+    font-size: 18px;
+    display: grid; place-items: center;
+    opacity: .3;
+    transition: opacity .3s, background .3s;
+    cursor: pointer;
+    z-index: 2;
+  }
+  #fullscreen:active { background: rgba(80,45,30,.5); }
+  #fullscreen:focus-visible { opacity: .9; }
+  @media (hover: hover) {
+    body:hover #fullscreen { opacity: .75; }
+  }
+</style>
+</head>
+<body>
+<canvas id="fire" aria-label="잔잔하게 타오르는 픽셀 불꽃"></canvas>
+<button id="fullscreen" aria-label="전체 화면" title="전체 화면">⛶</button>
+
+<script>
+(() => {
+  const canvas = document.getElementById("fire");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  const fullscreenButton = document.getElementById("fullscreen");
+
+  // 열 값 0~30에 대응하는 검붉은색 → 주황색 → 노란색 팔레트
+  const palette = [
+    "#050303", "#080403", "#100503", "#190604", "#230704",
+    "#300804", "#400a05", "#520d06", "#650f07", "#791208",
+    "#8e1708", "#a21d09", "#b52409", "#c82b09", "#d8320b",
+    "#e43d0d", "#ed4c10", "#f45c13", "#f96d17", "#fc7d1b",
+    "#ff8e20", "#ffa02a", "#ffb137", "#ffc047", "#ffcd5c",
+    "#ffd978", "#ffe394", "#ffebae", "#fff1c5", "#fff7dc",
+    "#fffbea"
+  ];
+
+  let cols = 0, rows = 0;
+  let heat, nextHeat;
+  let width = 0, height = 0, dpr = 1;
+  let lastTime = 0, accumulator = 0;
+
+  let fan = 0;
+  let windX = 0;
+  let windPower = 0;
+  let lastPointer = null;
+  let heldPointer = null;
+  let holdHeatTimer = 0;
+  let holdDuration = 0;
+  let flamePulse = 0;
+  let glowStrength = 0;
+
+  const embers = [];
+  const STEP = 55;
+  let CELL = 5;
+
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const rand = (min, max) => min + Math.random() * (max - min);
+
+  function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    // 화면 크기에 따라 픽셀 크기 자동 조절
+    CELL = clamp(Math.round(Math.min(width, height) / 115), 4, 6);
+
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    cols = Math.max(1, Math.ceil(width / CELL));
+    rows = Math.max(1, Math.ceil(height / CELL));
+    heat = Array.from({ length: rows }, () => new Float32Array(cols));
+    nextHeat = Array.from({ length: rows }, () => new Float32Array(cols));
+    seedBase();
+  }
+
+  function seedBase() {
+    const center = (cols - 1) / 2;
+    const spread = Math.max(6, cols * 0.35);
+    const bottom = rows - 1;
+
+    for (let x = 0; x < cols; x++) {
+      const distance = (x - center) / spread;
+      const strength = Math.exp(-distance * distance * 1.1);
+
+      if (Math.random() < strength * rand(0.72, 1)) {
+        heat[bottom][x] = rand(27, 30);
+      }
+
+      if (bottom > 0 && Math.random() < strength * 0.2) {
+        heat[bottom - 1][x] = rand(19, 27);
+      }
+    }
+  }
+
+  function makeEmber(x, y, amount = 1) {
+    for (let i = 0; i < amount && embers.length < 65; i++) {
+      embers.push({
+        x: x + rand(-9, 9),
+        y: y + rand(-5, 5),
+        vx: rand(-0.16, 0.16),
+        vy: rand(-0.85, -0.35),
+        life: rand(850, 1900),
+        age: 0,
+        size: rand(1.1, 2.5)
+      });
+    }
+  }
+
+  function addTouchFlame(clientX, clientY) {
+    const x = clamp(Math.floor(clientX / width * cols), 0, cols - 1);
+    const y = clamp(Math.floor(clientY / height * rows), 0, rows - 1);
+    const radius = Math.max(2, Math.floor(cols * 0.014));
+
+    for (let dx = -radius; dx <= radius; dx++) {
+      const px = x + dx;
+      if (px < 0 || px >= cols) continue;
+
+      const strength = 1 - Math.abs(dx) / (radius + 1);
+      heat[y][px] = Math.max(heat[y][px], 18 + strength * 12);
+
+      if (y + 1 < rows) {
+        heat[y + 1][px] = Math.max(heat[y + 1][px], 20 + strength * 10);
+      }
+    }
+
+    makeEmber(clientX, clientY, 2);
+  }
+
+  function updateFire() {
+    const center = (cols - 1) / 2;
+    const spread = Math.max(6, cols * (0.34 + fan * 0.035));
+    const bottom = rows - 1;
+
+    // 불꽃의 세기가 천천히 오르내리며 가끔 높게 솟아오른다.
+    flamePulse += 0.045;
+    const slowWave = (Math.sin(flamePulse) + 1) * 0.5;
+    const burst = Math.max(0, Math.sin(flamePulse * 0.37 + 1.8) - 0.72) * 0.9;
+
+    // 오래 누를수록 열 공급 범위와 세기가 증가한다.
+    if (heldPointer) {
+      holdHeatTimer += STEP;
+      holdDuration += STEP;
+      fan = Math.min(1, fan + 0.035);
+
+      const x = clamp(Math.floor(heldPointer.x / width * cols), 0, cols - 1);
+      const y = clamp(Math.floor(heldPointer.y / height * rows), 0, rows - 1);
+      const strength = clamp(holdDuration / 1800, 0, 1);
+      const radius = Math.max(2, Math.floor(cols * (0.012 + strength * 0.012)));
+
+      for (let dx = -radius; dx <= radius; dx++) {
+        const px = x + dx;
+        if (px < 0 || px >= cols) continue;
+
+        const falloff = 1 - Math.abs(dx) / (radius + 1);
+        heat[y][px] = Math.max(heat[y][px], 20 + falloff * (8 + strength * 2));
+
+        if (y + 1 < rows) {
+          heat[y + 1][px] = Math.max(heat[y + 1][px], 22 + falloff * 8);
+        }
+      }
+
+      if (holdHeatTimer >= 360) {
+        makeEmber(heldPointer.x, heldPointer.y, 1);
+        holdHeatTimer = 0;
+      }
+    }
+
+    // 바닥에서 열 공급
+    for (let x = 0; x < cols; x++) {
+      const distance = (x - center) / spread;
+      const strength = Math.exp(-distance * distance * 1.12);
+      const localVariation = rand(0.78, 1.08);
+      const boost = fan * strength + burst * strength;
+      const chance = clamp(
+        strength * (0.76 + slowWave * 0.12 + boost * 0.16) * localVariation,
+        0, 0.99
+      );
+
+      if (Math.random() < chance) {
+        heat[bottom][x] = Math.max(
+          heat[bottom][x],
+          clamp(27 + Math.random() * 3 + boost * 2, 0, 30)
+        );
+      } else {
+        heat[bottom][x] = Math.max(0, heat[bottom][x] - rand(0.35, 1.25));
+      }
+    }
+
+    // 열이 위로 이동하면서 식고 좌우로 흩어진다.
+    // 바람이 불면 불꽃 전체가 해당 방향으로 조금 기울어진다.
+    const lean = windX * windPower * 1.8;
+
+    for (let y = rows - 2; y >= 0; y--) {
+      const heightRatio = 1 - y / rows;
+      const fadeByHeight = heightRatio > 0.72
+        ? (heightRatio - 0.72) * 1.15
+        : 0;
+
+      for (let x = 0; x < cols; x++) {
+        const below = heat[y + 1];
+        const shift = lean * (0.25 + heightRatio * 0.75);
+        const sourceX = x - shift;
+        const baseX = Math.floor(sourceX);
+        const fraction = sourceX - baseX;
+
+        const get = (index) => below[clamp(index, 0, cols - 1)];
+
+        const left = get(baseX - 1);
+        const middle = get(baseX) * (1 - fraction) + get(baseX + 1) * fraction;
+        const right = get(baseX + 2);
+
+        // 가장자리가 불규칙하게 흔들리도록 열을 전달한다.
+        const mix = rand(0.28, 0.48);
+        const source = middle * (1 - mix) + (left + right) * (mix / 2);
+        const cooling = rand(0.12, 0.82) + fadeByHeight;
+        const turbulence = rand(-0.55, 0.35);
+
+        let value = source - cooling + turbulence;
+
+        if (value > 0 && Math.random() < 0.055) {
+          value -= rand(1, 3.5);
+        }
+
+        nextHeat[y][x] = clamp(value, 0, 30);
+      }
+    }
+
+    const temp = heat;
+    heat = nextHeat;
+    nextHeat = temp;
+
+    // 불씨가 가끔 떠오른다.
+    if (Math.random() < 0.10 + fan * 0.12 + burst * 0.08) {
+      const x = rand(width * 0.32, width * 0.68);
+      makeEmber(x, height * rand(0.69, 0.9), 1);
+    }
+
+    // 불꽃 전체의 밝기를 계산한다.
+    let total = 0;
+    const sampleY = Math.floor(rows * 0.35);
+
+    for (let y = sampleY; y < rows; y += 3) {
+      for (let x = 0; x < cols; x += 3) {
+        total += heat[y][x];
+      }
+    }
+
+    glowStrength = clamp(total / (cols * rows * 0.018), 0.25, 1.25);
+  }
+
+  function drawBackground() {
+    ctx.fillStyle = "#050303";
+    ctx.fillRect(0, 0, width, height);
+
+    // 불꽃 밝기에 따라 주변 빛도 변한다.
+    const glowAlpha = 0.10 + glowStrength * 0.075;
+
+    const glow = ctx.createRadialGradient(
+      width * 0.5, height * 0.91, 0,
+      width * 0.5, height * 0.83,
+      Math.max(width, height) * 0.58
+    );
+
+    glow.addColorStop(0, `rgba(100, 38, 10, ${glowAlpha})`);
+    glow.addColorStop(0.38, `rgba(55, 19, 7, ${glowAlpha * 0.52})`);
+    glow.addColorStop(1, "rgba(5, 3, 3, 0)");
+
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, width, height);
+  }
+
+  function drawFire() {
+    const cellW = width / cols;
+    const cellH = height / rows;
+
+    for (let y = 0; y < rows; y++) {
+      const row = heat[y];
+
+      for (let x = 0; x < cols; x++) {
+        const value = Math.round(row[x]);
+        if (value <= 0) continue;
+
+        ctx.fillStyle = palette[clamp(value, 0, 30)];
+
+        ctx.fillRect(
+          Math.floor(x * cellW),
+          Math.floor(y * cellH),
+          Math.ceil(cellW + 0.35),
+          Math.ceil(cellH + 0.35)
+        );
+      }
+    }
+  }
+
+  function drawEmbers(delta) {
+    for (let i = embers.length - 1; i >= 0; i--) {
+      const e = embers[i];
+
+      e.age += delta;
+      e.x += e.vx * delta * 0.06
+        + Math.sin(e.age * 0.0025 + i) * 0.13;
+      e.y += e.vy * delta * 0.06;
+      e.vy *= 0.9992;
+
+      const lifeRatio = clamp(1 - e.age / e.life, 0, 1);
+
+      if (lifeRatio <= 0 || e.y < -10) {
+        embers.splice(i, 1);
+        continue;
+      }
+
+      // 위로 갈수록 작아지고 투명해지는 불씨
+      ctx.globalAlpha = lifeRatio * 0.82;
+      ctx.fillStyle = i % 3 === 0 ? "#ffd978" : "#ff8b32";
+
+      const size = Math.max(0.55, e.size * (0.35 + lifeRatio * 0.65));
+      ctx.fillRect(e.x, e.y, size, size);
+    }
+
+    ctx.globalAlpha = 1;
+  }
+
+  function frame(time) {
+    const delta = Math.min(50, time - (lastTime || time));
+    lastTime = time;
+    accumulator += delta;
+
+    fan = Math.max(0, fan - delta / 1050);
+    windPower = Math.max(0, windPower - delta / 650);
+
+    if (windPower < 0.015) windX *= 0.92;
+
+    while (accumulator >= STEP) {
+      updateFire();
+      accumulator -= STEP;
+    }
+
+    drawBackground();
+    drawFire();
+    drawEmbers(delta);
+
+    requestAnimationFrame(frame);
+  }
+
+  canvas.addEventListener("pointerdown", (event) => {
+    heldPointer = { x: event.clientX, y: event.clientY };
+    holdHeatTimer = 0;
+    holdDuration = 0;
+
+    lastPointer = { x: event.clientX, y: event.clientY };
+    addTouchFlame(event.clientX, event.clientY);
+
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch (_) {}
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (!lastPointer || !(event.buttons || event.pressure > 0)) return;
+
+    const dx = event.clientX - lastPointer.x;
+    const dy = event.clientY - lastPointer.y;
+    const distance = Math.hypot(dx, dy);
+
+    if (distance > 1) {
+      fan = Math.min(1, fan + Math.min(0.24, distance / 85));
+
+      // 드래그 방향으로 불꽃이 잠시 기울어진다.
+      windX = clamp(dx / Math.max(1, distance), -1, 1);
+      windPower = Math.min(
+        1,
+        windPower + Math.min(0.35, distance / 100)
+      );
+
+      const x = clamp(
+        Math.floor(event.clientX / width * cols), 0, cols - 1
+      );
+      const y = clamp(
+        Math.floor(event.clientY / height * rows), 0, rows - 1
+      );
+
+      for (let k = -2; k <= 2; k++) {
+        const px = x + k;
+
+        if (px >= 0 && px < cols && y >= 0 && y < rows) {
+          heat[y][px] = Math.max(
+            heat[y][px],
+            12 + (2 - Math.abs(k)) * 3 + fan * 5
+          );
+        }
+      }
+    }
+
+    lastPointer = { x: event.clientX, y: event.clientY };
+
+    if (heldPointer) {
+      heldPointer = { x: event.clientX, y: event.clientY };
+    }
+  });
+
+  function endPointer() {
+    lastPointer = null;
+    heldPointer = null;
+    holdHeatTimer = 0;
+    holdDuration = 0;
+  }
+
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
+  canvas.addEventListener("lostpointercapture", endPointer);
+
+  fullscreenButton.addEventListener("click", async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch (_) {}
+  });
+
+  window.addEventListener("resize", resize, { passive: true });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      lastTime = 0;
+      accumulator = 0;
+    }
+  });
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
